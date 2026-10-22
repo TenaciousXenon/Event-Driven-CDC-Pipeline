@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
 cd "$(dirname "$0")/.."
-
 # Start infrastructure first; no worker can write until aliases exist.
 docker compose up -d postgres redpanda elasticsearch redis debezium
 for service in http://localhost:9200 http://localhost:8083/connectors; do
@@ -18,7 +17,6 @@ for topic in app.public.events app.public.events.elasticsearch.dlq app.public.ev
       -c cleanup.policy=delete -c retention.ms=604800000
   fi
 done
-
 # A fresh namespace is required; never silently migrate an existing hard-delete demo.
 status=$(curl -sS -o /dev/null -w '%{http_code}' http://localhost:9200/_alias/events-write)
 if [[ "$status" == 404 ]]; then

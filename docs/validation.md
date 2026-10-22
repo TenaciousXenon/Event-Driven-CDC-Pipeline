@@ -5,31 +5,40 @@ Validated with a workspace-local Go 1.27.1 toolchain:
 - `gofmt` on all Go source files: clean.
 - `go mod verify`: all modules verified.
 - `go vet ./...`: passed.
-- `go test -race -count=1 -cover ./...`: passed.
-- `go build -buildvcs=false ./...`: passed. VCS stamping was disabled because this
-  assembled source tree is not a standalone Git checkout in the execution workspace.
-- JSON and YAML parsing: passed.
-- Bash syntax checks for bootstrap and smoke scripts: passed.
+- `go test -race -count=1 -cover ./...`: passed, including actual Redis integration.
+- `go build -buildvcs=false ./...`: passed. VCS stamping was disabled because the
+  assembled tree is not a standalone Git checkout in the execution workspace.
+- A five-second, two-worker decoder fuzz run: passed, 63,333 generated executions.
+- Ten Python harness tests: passed, without Docker.
+- Python/JSON/YAML parsing and Bash syntax checks: passed.
+- Scenario list/plan commands: exercised without Docker; all 14 toggles available.
 
-Race-enabled tests cover decoder validation and large integers, retry and
-cancellation, commit/DLQ barriers, HTTP write/version/delete semantics, reindex
-lock contention, failed write fences, failed copy tasks, count mismatches and
-alias request failure. Reindex tests use an HTTP test server; they do not establish
-real-cluster behavior by themselves.
+A temporary Redis 7.4.2 server was built and run locally to exercise the actual Lua
+script. Duplicate/stale writes, persistent delete guards, versions above 2^53 and
+128 concurrent out-of-order versions passed under the Go race detector. That
+server had no persistent data and was stopped after the tests; this does not
+establish the Docker service's AOF restart behavior.
 
-The Redis integration test is skipped locally because no Redis server is
-available. The CI unit job supplies a Redis service and sets `REDIS_TEST_ADDR` to
-exercise the actual Lua script, duplicate/stale writes, deletes, and IDs/versions
-above JavaScript/Lua's exact floating-point integer range.
+Race-enabled tests cover the commit/DLQ ordering barrier, interrupted retries,
+ambiguous commit acknowledgement and redelivery, exact DLQ diagnostic bytes,
+permanent/transient error classification, decoder bounds, HTTP behavior and
+reindex failures before and after alias publication. Reindex tests use HTTP test
+servers and do not establish real-cluster behavior by themselves. The host-side
+runner tests cover project isolation, cleanup ordering, interrupted runs, setup
+failure, stopping after failures and preventing false pass reports.
 
-Docker is not installed in this execution environment. Container image builds,
-Compose startup, the real Debezium pipeline, and live Elasticsearch reindex were
-**not executed here**. The included GitHub Actions integration job builds the
-images, bootstraps a fresh stack and runs `scripts/smoke.sh`. Run that job or the
-same scripts locally before tagging a release. No CI run is claimed to have
-completed, and no GitHub repository has been created or pushed.
+The new failure-classification tests identified and fixed a behavior in the prior
+version: not every Elasticsearch HTTP 400 is a poison event. Only recognized
+mapping/document parsing errors are now quarantined; missing required aliases and
+other configuration errors leave source offsets uncommitted.
 
-Not yet covered by automated end-to-end checks: broker/node loss, process kills
-at every commit boundary, rebalance storms, retention exhaustion, and concurrent
-DDL/schema changes. The current implementation documents those operational
-limits rather than claiming production fault tolerance.
+Docker is not installed in this execution environment. Image builds, Compose
+startup, the real Debezium pipeline, live Elasticsearch reindex and the **14 Docker
+chaos scenarios were not executed here**. No completed GitHub Actions run is
+claimed. Run the integration job and the manual chaos workflow, or use the local
+commands in [testing.md](testing.md), before relying on those end-to-end checks.
+
+The suite includes runnable process/service fault scenarios, but does not yet test
+asymmetric network partitions, replicated node loss, storage corruption,
+rebalance storms, retention/WAL exhaustion or concurrent DDL. It does not claim
+exactly-once delivery or cross-sink atomicity.

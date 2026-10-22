@@ -24,6 +24,9 @@ func TestElasticDelivery(t *testing.T) {
 					t.Error("delete must persist a tombstone")
 				}
 				w.WriteHeader(status)
+				if status == 400 {
+					w.Write([]byte(`{"error":{"type":"mapper_parsing_exception"}}`))
+				}
 			}))
 			defer server.Close()
 			s := Elasticsearch{Client: elastic.New(server.URL), Alias: "events-write"}
@@ -34,6 +37,30 @@ func TestElasticDelivery(t *testing.T) {
 			var permanent *processing.PermanentError
 			if errors.As(err, &permanent) != (status == 400) {
 				t.Fatal("classification", err)
+			}
+		})
+	}
+}
+
+func TestOnlyDocumentErrorsAreQuarantined(t *testing.T) {
+	for _, tt := range []struct {
+		kind      string
+		permanent bool
+	}{
+		{"mapper_parsing_exception", true}, {"document_parsing_exception", true}, {"strict_dynamic_mapping_exception", true},
+		{"index_not_found_exception", false}, {"illegal_argument_exception", false}, {"cluster_block_exception", false}, {"", false},
+	} {
+		t.Run(tt.kind, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(400)
+				json.NewEncoder(w).Encode(map[string]any{"error": map[string]any{"type": tt.kind}})
+			}))
+			defer server.Close()
+			sink := Elasticsearch{Client: elastic.New(server.URL), Alias: "events-write"}
+			err := sink.Apply(context.Background(), processing.Event{ID: "1", Version: 1, Deleted: true})
+			var permanent *processing.PermanentError
+			if err == nil || errors.As(err, &permanent) != tt.permanent {
+				t.Fatalf("classification of %s: %v", tt.kind, err)
 			}
 		})
 	}

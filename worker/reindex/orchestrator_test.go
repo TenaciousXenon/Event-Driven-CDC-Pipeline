@@ -12,7 +12,7 @@ import (
 )
 
 func TestFencedCutover(t *testing.T) {
-	for _, failure := range []string{"", "lock", "block", "task", "count", "swap"} {
+	for _, failure := range []string{"", "lock", "create", "checkpoint", "block", "refresh", "task", "count", "count-shard", "swap", "swap-unacknowledged", "swap-errors", "promoted-checkpoint"} {
 		t.Run("failure_"+failure, func(t *testing.T) {
 			blocked, copied, swapped, unlocked := false, false, false, false
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -29,8 +29,24 @@ func TestFencedCutover(t *testing.T) {
 				case strings.HasPrefix(path, "/_alias/"):
 					fmt.Fprint(w, `{"events-v1":{"aliases":{}}}`)
 				case path == "/cdc-reindex-locks/_update/events":
+					var checkpoint struct {
+						Doc struct {
+							Phase string `json:"phase"`
+						} `json:"doc"`
+					}
+					json.NewDecoder(r.Body).Decode(&checkpoint)
+					if failure == "checkpoint" || (failure == "promoted-checkpoint" && checkpoint.Doc.Phase == "promoted") {
+						w.WriteHeader(503)
+						fmt.Fprint(w, `{}`)
+						return
+					}
 					fmt.Fprint(w, `{}`)
 				case path == "/events-v2" && r.Method == "PUT":
+					if failure == "create" {
+						w.WriteHeader(400)
+						fmt.Fprint(w, `{}`)
+						return
+					}
 					fmt.Fprint(w, `{}`)
 				case path == "/events-v1/_block/write":
 					if failure == "block" {
@@ -43,8 +59,16 @@ func TestFencedCutover(t *testing.T) {
 					if !blocked {
 						t.Error("refresh before fence")
 					}
+					if failure == "refresh" {
+						fmt.Fprint(w, `{"_shards":{"failed":1}}`)
+						return
+					}
 					fmt.Fprint(w, `{"_shards":{"failed":0}}`)
 				case strings.HasSuffix(path, "/_count"):
+					if failure == "count-shard" {
+						fmt.Fprint(w, `{"count":2,"_shards":{"failed":1}}`)
+						return
+					}
 					count := 2
 					if failure == "count" && strings.HasPrefix(path, "/events-v2/") {
 						count = 1
@@ -90,6 +114,14 @@ func TestFencedCutover(t *testing.T) {
 						return
 					}
 					swapped = true
+					if failure == "swap-unacknowledged" {
+						fmt.Fprint(w, `{"acknowledged":false}`)
+						return
+					}
+					if failure == "swap-errors" {
+						fmt.Fprint(w, `{"acknowledged":true,"errors":true}`)
+						return
+					}
 					fmt.Fprint(w, `{"acknowledged":true}`)
 				case path == lockPath && r.Method == "DELETE":
 					unlocked = true
@@ -109,8 +141,11 @@ func TestFencedCutover(t *testing.T) {
 				if !swapped || !unlocked {
 					t.Fatal("not promoted")
 				}
-			} else if swapped || unlocked {
-				t.Fatal("failure released fence or promoted")
+			} else {
+				mayHaveSwapped := failure == "swap-unacknowledged" || failure == "swap-errors" || failure == "promoted-checkpoint"
+				if unlocked || swapped != mayHaveSwapped {
+					t.Fatal("failure released lock or crossed unexpected cutover boundary")
+				}
 			}
 		})
 	}

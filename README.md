@@ -79,7 +79,7 @@ Never write directly to a physical index; workers enforce `require_alias=true`.
 | Stable partitioning | A primary key must stay in the **same topic and partition** for the lifetime of these sink namespaces. Never increase partition count or recreate the topic in place. |
 | Deletes | Durable soft tombstones in ES and persistent Redis version hashes prevent late resurrection. |
 | Sink outages | Five exponential-backoff attempts with jitter, then process exits nonzero without committing. Compose restarts it. An outage is never intentionally sent to DLQ. |
-| Poison events | Invalid envelopes/keys/operations and ES HTTP 400 errors go to the sink-specific DLQ. Operators must alert on and repair these omissions. |
+| Poison events | Invalid envelopes/keys/operations and ES document parsing/mapping errors go to the sink-specific DLQ. Operators must alert on and repair these omissions. |
 | Shutdown / DLQ failure | No commit for the interrupted or unquarantined message. |
 | Cross-sink consistency | Eventual and independent. No transaction spans Kafka, Redis and Elasticsearch. |
 | Broker retention | Seven days in this demo. If lag exceeds retained history, recovery requires a fresh snapshot into new sink namespaces. |
@@ -143,6 +143,24 @@ physical names matching `events-v[a-z0-9][a-z0-9_-]*`. Its flags are `-target`,
 `-mapping`, `-url` and `-timeout` (30 minutes by default).
 Do not give both sinks the same consumer group: that load-balances messages
 between sinks instead of delivering every message to each sink.
+
+## Fault tests
+
+See [the testing guide](docs/testing.md) for the full test matrix and recovery instructions.
+Chaos runs use a separate Compose project and separate data volumes, with no host ports.
+
+```bash
+bash scripts/test.sh unit
+bash scripts/test.sh fuzz
+python3 tests/chaos/run.py list
+bash scripts/test.sh chaos --scenario redis-outage --scenario worker-crash
+bash scripts/test.sh chaos --all --duration 10
+python3 tests/chaos/run.py down --volumes  # Explicitly erase the disposable lab.
+```
+
+Fourteen selectable scenarios test outages, crashes, poison/DLQ barriers, replay,
+persistence and reindex cutover/failure. Each checks the resulting state and writes
+a JSON report. They are also available through a manual GitHub Actions workflow.
 
 ## Development and checks
 

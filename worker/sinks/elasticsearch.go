@@ -4,6 +4,7 @@ import (
 	"context"
 	"distributed-cdc/worker/elastic"
 	"distributed-cdc/worker/processing"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/url"
@@ -25,7 +26,19 @@ func (s *Elasticsearch) Apply(ctx context.Context, e processing.Event) error {
 			return nil
 		} // Duplicate or stale delivery.
 		if h.Status == 400 {
-			return processing.Permanent(err)
+			// A missing required alias is also HTTP 400. Only document-specific
+			// parsing failures are poison; configuration failures must not commit.
+			var response struct {
+				Error struct {
+					Type string `json:"type"`
+				} `json:"error"`
+			}
+			if json.Unmarshal([]byte(h.Body), &response) == nil {
+				switch response.Error.Type {
+				case "mapper_parsing_exception", "document_parsing_exception", "strict_dynamic_mapping_exception":
+					return processing.Permanent(err)
+				}
+			}
 		}
 	}
 	return err
