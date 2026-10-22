@@ -1,0 +1,16 @@
+worker/
+├── main.go
+│
+├── consumer/
+│   ├── reader.go
+│   └── offsets.go
+│
+├── processing/
+│   ├── decoder.go
+│   ├── retry.go
+│   └── dlq.go
+│
+└── sinks/
+    ├── sink.go
+    ├── elasticsearch.go
+    └── redis.go

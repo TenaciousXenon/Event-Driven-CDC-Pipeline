@@ -1,0 +1,5 @@
+# list of potential CLI to use for different tasks
+To inspect failed events 
+docker compose exec redpanda rpk topic consume app.public.events.dlq -o start
+Check the logs
+docker compose logs -f worker
