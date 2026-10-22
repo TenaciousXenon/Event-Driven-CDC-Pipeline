@@ -1,0 +1,5 @@
+.git
+*.log
+coverage.out
+worker
+reindex-cli

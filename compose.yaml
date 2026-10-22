@@ -1,38 +1,26 @@
-# Comments are provided throughout this file to help you get started.
-# If you need more help, visit the Docker Compose reference guide at
-# https://docs.docker.com/go/compose-spec-reference/
-
-# Here the instructions define your application as a service called "server".
-# This service is built from the Dockerfile in the current directory.
-# You can add other services your application may depend on here, such as a
-# database or a cache. For examples, see the Awesome Compose repository:
-# https://github.com/docker/awesome-compose
-
+name: distributed-cdc
+x-worker: &worker
+  build: ./worker
+  restart: on-failure
+  init: true
+  stop_grace_period: 30s
 services:
-  server:
-    build:
-      context: ./worker
-      target: final
-    ports:
-      - "8080:8080"
-
   postgres:
     image: postgres:16
     environment:
       POSTGRES_USER: app
       POSTGRES_PASSWORD: localdev
       POSTGRES_DB: eventsdb
-    command:
-      - postgres
-      - -c
-      - wal_level=logical
-      - -c
-      - max_slot_wal_keep_size=4GB # This is for Debezium going offline, I am limiting it so it doesnt eat my disk space.
-    ports:
-      - "127.0.0.1:5432:5432"
+    command: [postgres, -c, wal_level=logical, -c, max_slot_wal_keep_size=4GB]
+    ports: ["127.0.0.1:5432:5432"]
     volumes:
       - postgres_data:/var/lib/postgresql/data
-  
+      - ./postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -U app -d eventsdb"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
   redpanda:
     image: docker.redpanda.com/redpandadata/redpanda:v26.2.4
     command:
@@ -50,97 +38,85 @@ services:
       - redpanda:33145
       - --advertise-rpc-addr
       - redpanda:33145
-    volumes:
-      - redpanda_data:/var/lib/redpanda/data
-  
+    volumes: [redpanda_data:/var/lib/redpanda/data]
+    healthcheck:
+      test: [CMD, rpk, cluster, health, --exit-when-healthy]
+      interval: 5s
+      timeout: 5s
+      retries: 30
   debezium:
     image: quay.io/debezium/connect:3.1
-    ports:
-      - "127.0.0.1:8083:8083"
+    ports: ["127.0.0.1:8083:8083"]
     environment:
       BOOTSTRAP_SERVERS: redpanda:9092
       GROUP_ID: cdc-connect
       CONFIG_STORAGE_TOPIC: connect_configs
       OFFSET_STORAGE_TOPIC: connect_offsets
       STATUS_STORAGE_TOPIC: connect_statuses
-      CONNECT_CONFIG_STORAGE_REPLICATION_FACTOR: "1"
-      CONNECT_OFFSET_STORAGE_REPLICATION_FACTOR: "1"
-      CONNECT_STATUS_STORAGE_REPLICATION_FACTOR: "1"
+      CONFIG_STORAGE_REPLICATION_FACTOR: "1"
+      OFFSET_STORAGE_REPLICATION_FACTOR: "1"
+      STATUS_STORAGE_REPLICATION_FACTOR: "1"
+      KEY_CONVERTER: org.apache.kafka.connect.json.JsonConverter
+      VALUE_CONVERTER: org.apache.kafka.connect.json.JsonConverter
+      KEY_CONVERTER_SCHEMAS_ENABLE: "true"
+      VALUE_CONVERTER_SCHEMAS_ENABLE: "true"
     depends_on:
-      - postgres
-      - redpanda
-  
-  worker:
-    build:
-      context: ./worker
-    environment:
-      REDPANDA_BROKERS: redpanda:9092
-      CONSUMER_GROUP: cdc-workers
-      ELASTICSEARCH_URL: http://elasticsearch:9200
-      REDIS_ADDR: redis:6379
-    depends_on:
-      - redpanda
-      - elasticsearch
-      - redis
-  
+      postgres: {condition: service_healthy}
+      redpanda: {condition: service_healthy}
   elasticsearch:
     image: docker.elastic.co/elasticsearch/elasticsearch:8.19.23
     environment:
       discovery.type: single-node
       xpack.security.enabled: "false"
-      ES_JAVA_OPTS: "-Xms512m -Xmx512m"
-    ports:
-      - "127.0.0.1:9200:9200"
-    volumes:
-      - elasticsearch_data:/usr/share/elasticsearch/data
-  
+      ES_JAVA_OPTS: -Xms512m -Xmx512m
+    ports: ["127.0.0.1:9200:9200"]
+    volumes: [elasticsearch_data:/usr/share/elasticsearch/data]
+    healthcheck:
+      test: [CMD-SHELL, "curl -fsS 'http://localhost:9200/_cluster/health?wait_for_status=yellow&timeout=2s' >/dev/null"]
+      interval: 5s
+      timeout: 5s
+      retries: 60
   redis:
     image: redis:7-alpine
-    ports:
-      - "127.0.0.1:6379:6379"
-    command: ["redis-server", "--appendonly", "yes"]
-    volumes:
-      - redis_data:/data
-
-
-
-
+    ports: ["127.0.0.1:6379:6379"]
+    command: [redis-server, --appendonly, "yes", --appendfsync, always, --maxmemory-policy, noeviction]
+    volumes: [redis_data:/data]
+    healthcheck:
+      test: [CMD, redis-cli, ping]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+  worker-elasticsearch:
+    <<: *worker
+    environment:
+      SINK: elasticsearch
+      CONSUMER_GROUP: cdc-elasticsearch
+      REDPANDA_BROKERS: redpanda:9092
+      ELASTICSEARCH_URL: http://elasticsearch:9200
+      DLQ_TOPIC: app.public.events.elasticsearch.dlq
+    depends_on:
+      redpanda: {condition: service_healthy}
+      elasticsearch: {condition: service_healthy}
+  worker-redis:
+    <<: *worker
+    environment:
+      SINK: redis
+      CONSUMER_GROUP: cdc-redis
+      REDPANDA_BROKERS: redpanda:9092
+      REDIS_ADDR: redis:6379
+      DLQ_TOPIC: app.public.events.redis.dlq
+    depends_on:
+      redpanda: {condition: service_healthy}
+      redis: {condition: service_healthy}
+  reindex:
+    build: ./worker
+    profiles: [tools]
+    entrypoint: [/bin/reindex]
+    volumes: [./elasticsearch/index-mapping.json:/config/index-mapping.json:ro]
+    depends_on:
+      elasticsearch: {condition: service_healthy}
 volumes:
   postgres_data:
   redpanda_data:
   elasticsearch_data:
   redis_data:
-
-# The commented out section below is an example of how to define a PostgreSQL
-# database that your application can use. `depends_on` tells Docker Compose to
-# start the database before your application. The `db-data` volume persists the
-# database data between container restarts. The `db-password` secret is used
-# to set the database password. You must create `db/password.txt` and add
-# a password of your choosing to it before running `docker compose up`.
-#     depends_on:
-#       db:
-#         condition: service_healthy
-#   db:
-#     image: postgres
-#     restart: always
-#     user: postgres
-#     secrets:
-#       - db-password
-#     volumes:
-#       - db-data:/var/lib/postgresql/data
-#     environment:
-#       - POSTGRES_DB=example
-#       - POSTGRES_PASSWORD_FILE=/run/secrets/db-password
-#     expose:
-#       - 5432
-#     healthcheck:
-#       test: [ "CMD", "pg_isready" ]
-#       interval: 10s
-#       timeout: 5s
-#       retries: 5
-# volumes:
-#   db-data:
-# secrets:
-#   db-password:
-#     file: db/password.txt
-
